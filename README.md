@@ -3,7 +3,7 @@ pullprinting
 
 Requirements:
 * GoLang
-* MongoDB
+* MongoDB (db: test, user: admin, pwd: admin)
 * bzr
 
 Usage:

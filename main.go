@@ -1,23 +1,26 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
+	"github.com/codegangsta/martini"
 	"labix.org/v2/mgo"
 	"log"
-	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
+	"os/exec"
 )
 
 var (
 	port    = flag.Int("p", 8080, "webserver port")
 	dirPath = flag.String("dir", "./up/", "directory path for uploaded files")
 )
+
+type Server struct {
+	m       *martini.ClassicMartini
+	session *mgo.Session
+	db      *mgo.Database
+	gfs     *mgo.GridFS
+}
 
 type Result struct {
 	Files []*FileInfo `json:"files"`
@@ -34,89 +37,122 @@ type FileInfo struct {
 	DeleteType   string `json:"delete_type,omitempty"`
 }
 
+func NewServer() *Server {
+	var err error
+	var s Server
+	s.session, err = mgo.Dial("mongodb://admin:admin@localhost/test")
+	if err != nil {
+		fmt.Println("Cant connect to Mongo")
+		panic(err)
+	}
+	s.db = s.session.DB("")
+	s.gfs = s.db.GridFS("fs")
+
+	s.m = martini.Classic()
+
+	s.m.Handlers(martini.Recovery(), martini.Static("public"))
+
+	//s.m.Get("/", func() {
+	//	println(indexPage)
+	//})
+	s.registerHandlers()
+	//s.m.Post("/filename/:filename", printFile)
+	return &s
+}
+func (s *Server) registerHandlers() {
+	s.m.Get("/", s.Handler)
+	s.m.Post("/printer/:printername/file/:filename", s.PrintFile)
+}
+
+func (s *Server) Run() {
+	log.Print("api: starting server")
+
+	s.m.Run()
+}
+
 func main() {
 	flag.Parse()
 	if *dirPath == "" {
 		log.Fatal("Please specify directory path for uploaded files")
 	}
 
+	var s *Server = NewServer()
+	s.Run()
 	//For listing the available GridFS objects
-	session, err := mgo.Dial("mongodb://admin:admin@localhost/test")
-	if err != nil {
-		fmt.Println("Cant connect to Mongo")
-		panic(err)
-	}
-	defer session.Close()
+
+	defer s.session.Close()
 
 	var result *mgo.GridFile
-	db := session.DB("")
-	gfs := db.GridFS("fs")
-	iter := gfs.Find(nil).Iter()
+	iter := s.gfs.Find(nil).Iter()
 
-	for gfs.OpenNext(iter, &result) {
+	for s.gfs.OpenNext(iter, &result) {
 		fmt.Printf("Filename: %s\n", result.Name())
 	}
 	if iter.Err() != nil {
 		panic(iter.Err())
 	}
+	//
 
-	http.HandleFunc("/", handleHome)
-	addr := fmt.Sprintf(":%d", *port)
+	//http.HandleFunc("/", handleHome)
+	/*addr := fmt.Sprintf(":%d", *port)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal("Failed to run server: ", err)
-	}
+	}*/
 
 }
 
-func handleHome(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		if r.URL.Path == "/" {
-			fmt.Fprintf(w, indexPage)
-		} else {
-			http.Error(w, "Error", http.StatusNotFound)
-		}
-	} else {
-		var result Result
-		mr, _ := r.MultipartReader()
-		for {
-			part, err := mr.NextPart()
-			if err != nil {
-				break
-			}
-			if name := part.FormName(); name != "" {
-				if part.FileName() != "" {
-					result.Files = append(result.Files, uploadFile(w, part))
-				}
-			}
-		}
+func (s *Server) Handler() string {
 
-		js, _ := json.Marshal(result)
-		jsonType := "application/json"
-		if strings.Index(r.Header.Get("Accept"), jsonType) != -1 {
-			w.Header().Set("Content-Type", jsonType)
-		}
-		fmt.Fprintln(w, string(js))
+	//	fmt.Fprintf("%s", indexPage)
+	return indexPage
+}
+
+func (s *Server) PrintFile(w http.ResponseWriter, params martini.Params) {
+	fileName, printerName := params["filename"], params["printername"]
+
+	PrintFile := exec.Command("lp", "-d", printerName, fileName)
+
+	err := PrintFile.Run()
+	if err != nil {
+
+		fmt.Println("Error!")
 	}
 }
 
-func uploadFile(w http.ResponseWriter, p *multipart.Part) (fi *FileInfo) {
+/*func handleHome(w http.ResponseWriter, r *http.Request) {
+m.Get("/", fmt.Fprintf(w, indexPage))
+
+ else {
+	var result Result
+	mr, _ := r.MultipartReader()
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		if name := part.FormName(); name != "" {
+			if part.FileName() != "" {
+				result.Files = append(result.Files, uploadFile(w, part))
+			}
+		}
+	}
+
+	js, _ := json.Marshal(result)
+	jsonType := "application/json"
+	if strings.Index(r.Header.Get("Accept"), jsonType) != -1 {
+		w.Header().Set("Content-Type", jsonType)
+	}
+	fmt.Fprintln(w, string(js))
+} */
+
+/*func uploadFile(w http.ResponseWriter, p *multipart.Part) (fi *FileInfo) {
 	filePath := filepath.Join(*dirPath, p.FileName())
 	fi = &FileInfo{
 		Name: p.FileName(),
 		Type: p.Header.Get("Content-Type"),
 	}
 
-	session, err := mgo.Dial("mongodb://admin:admin@localhost:27017/test")
-	if err != nil {
-		fmt.Println("Cant connect to Mongo")
-		panic(err)
-	}
-	defer session.Close()
-
-	db := session.DB("test")
-	gfs := db.GridFS("fs")
-	gfsFile, err := gfs.Create(p.FileName())
-	defer gfsFile.Close()
+	gfsFile, err := s.gfs.Create(p.FileName())
 
 	size, err := io.Copy(gfsFile, p)
 	if err == nil {
@@ -137,7 +173,7 @@ func uploadFile(w http.ResponseWriter, p *multipart.Part) (fi *FileInfo) {
 	}
 	return
 }
-
+*/
 const indexPage = `
 <!DOCTYPE HTML>
 <html>
